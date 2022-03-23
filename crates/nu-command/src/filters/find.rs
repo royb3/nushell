@@ -29,6 +29,12 @@ impl Command for Find {
                 "regex to match with",
                 Some('r'),
             )
+            .named(
+                "column",
+                SyntaxShape::String,
+                "Only filter specified column",
+                Some('c'),
+            )
             .switch(
                 "insensitive",
                 "case-insensitive search for regex (?i)",
@@ -138,6 +144,7 @@ impl Command for Find {
         input: PipelineData,
     ) -> Result<PipelineData, ShellError> {
         let predicate = call.get_flag::<CaptureBlock>(engine_state, stack, "predicate")?;
+        let column = call.get_flag::<String>(engine_state, stack, "column")?;
         let regex = call.get_flag::<String>(engine_state, stack, "regex")?;
 
         match (regex, predicate) {
@@ -145,7 +152,7 @@ impl Command for Find {
                 find_with_predicate(predicate, engine_state, stack, call, input)
             }
             (Some(regex), None) => find_with_regex(regex, engine_state, stack, call, input),
-            (None, None) => find_with_rest(engine_state, stack, call, input),
+            (None, None) => find_with_rest(column, engine_state, stack, call, input),
             (Some(_), Some(_)) => Err(ShellError::IncompatibleParametersSingle(
                 "expected either predicate or regex flag, not both".to_owned(),
                 call.head,
@@ -248,6 +255,7 @@ fn find_with_predicate(
 }
 
 fn find_with_rest(
+    column: Option<String>,
     engine_state: &EngineState,
     stack: &mut Stack,
     call: &Call,
@@ -299,19 +307,43 @@ fn find_with_rest(
                 | Value::CustomValue { .. } => term
                     .r#in(span, &lower_value)
                     .map_or(false, |value| value.is_true()),
-                Value::Record { vals, .. } => vals.iter().any(|val| {
-                    if let Ok(span) = val.span() {
-                        let lower_val = Value::string(
-                            val.into_string("", &config).to_lowercase(),
-                            Span::test_data(),
-                        );
+                Value::Record { vals, cols, .. } => {
+                    if let Some(col) = &column {
+                        if let Some(col_index) = cols.iter().position(|p| p == col) {
+                            if let Some(val) = vals.get(col_index) {
+                                if let Ok(span) = val.span() {
+                                    let lower_val = Value::string(
+                                        val.into_string("", &config).to_lowercase(),
+                                        Span::test_data(),
+                                    );
 
-                        term.r#in(span, &lower_val)
-                            .map_or(false, |value| value.is_true())
+                                    term.r#in(span, &lower_val)
+                                        .map_or(false, |value| value.is_true())
+                                } else {
+                                    term.r#in(span, val).map_or(false, |value| value.is_true())
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     } else {
-                        term.r#in(span, val).map_or(false, |value| value.is_true())
+                        vals.iter().any(|val| {
+                            if let Ok(span) = val.span() {
+                                let lower_val = Value::string(
+                                    val.into_string("", &config).to_lowercase(),
+                                    Span::test_data(),
+                                );
+
+                                term.r#in(span, &lower_val)
+                                    .map_or(false, |value| value.is_true())
+                            } else {
+                                term.r#in(span, val).map_or(false, |value| value.is_true())
+                            }
+                        })
                     }
-                }),
+                }
                 Value::Binary { .. } => false,
             }) != invert
         },
